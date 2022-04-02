@@ -17,16 +17,16 @@ import PIL.Image as PImage
 
 dataset_split_percentage = 0.8  # percentage of images for training
 epochs = 80
-batchSize = 100
-IMG_SHAPE = 224
-inputSize = (224, 224)
-learningRate = 0.2
+batchSize = 32
+IMG_SHAPE = 229
+inputSize = (IMG_SHAPE, IMG_SHAPE)
+learningRate = 0.1
 
 dataSetDirectory :str
 trainingDirectory: str
 validationDirectory: str
 classes = ['roses', 'daisy', 'dandelion', 'sunflowers', 'tulips']
-classesDict= dict(roses=1,daisy=2,dandelion=3,sunflowers=4,tulips=5)
+classesDict= dict(roses=0,daisy=1,dandelion=2,sunflowers=3,tulips=4)
 
 
 testFolder = "test"
@@ -39,7 +39,6 @@ testSize = -1  # -1 for all
 augmentation_args = dict(
     width_shift_range=range((int)(IMG_SHAPE/2)),
     height_shift_range=range((int)(IMG_SHAPE/2)),
-    rotation_range=[0,90, 270],
     horizontal_flip=True,
     zoom=[True,0.5]
 )
@@ -125,32 +124,49 @@ def DataGenerator():
 
     return trainDataGen,validationDataGen
 
-def trainGenerator(batch_size, trainSetX, aug_dict, inputSize=(256, 256), inputChannels=3):
+def trainGenerator(batch_size, trainSet, aug_dict, inputSize=(256, 256), inputChannels=1):
 
     if batch_size > 0:
         while 1:
+
             iTile = 0
             nBatches = int(np.ceil(len(trainSet) / batch_size))
+
             for batchID in range(nBatches):
-                images = np.zeros(((batch_size,) + inputSize + (inputChannels,)))  #
-                labels = np.zeros((batch_size,1))
+
+                images = np.zeros(((batch_size,) + inputSize + (inputChannels,))).astype(float)  #
+                labels = np.zeros((batch_size,1)).astype(int)
                 iTileInBatch = 0
+
                 while iTileInBatch < batch_size:
+
                     if iTile < len(trainSet):
 
-                        image = getImageChannels(trainSetX[iTile][0])
-                        image = augmentImage(image, inputSize, aug_dict)
+                        labels[iTileInBatch] = classesDict[trainSet[iTile][1]]
+                        image = getImageChannels(trainSet[iTile][0])
+                        image = augmentImage(image, inputSize, aug_dict,labels[iTileInBatch])
+
+
+
                         image = np.array(image)
-                        images[iTileInBatch, :, :, :] = image[0]
-                        labels[iTileInBatch] = classesDict[trainSetX[iTile][1]]
+                        images[iTileInBatch, :, :, :] =  image
+                        images[iTileInBatch] = ((images[iTileInBatch] + 1)/2)
+
+                        #plt.title(classes[int(labels[iTileInBatch])] )
+                        #plt.imshow( images[iTileInBatch]*255 )
+                        #plt.waitforbuttonpress()
+
                         #for i in range(len(image)):
                          #   images[iTileInBatch, :, :, i] = image[ :, :, i]
 
                         iTile = iTile + 1
                         iTileInBatch = iTileInBatch + 1
                     else:
-                        images = images[0:iTileInBatch, :, :, :]
-                        break
+                        iTile = 0
+
+                        #images = images[0:iTileInBatch, :, :, :]
+                        #break
+
                 yield (images,labels)
 
 
@@ -183,12 +199,7 @@ def prepareDataset(datasetPath, trainFolder, valFolder):
 
     return trainSet,valSet
 
-def normalizeMask(mask, num_class=2):
-    mask = mask / 255
-    new_mask = np.zeros(mask.shape + (num_class,))
-    for i in range(num_class):
-        new_mask[mask == i, i] = 1.
-    return new_mask
+
 
 
 def normalizeChannel(channel):
@@ -207,13 +218,9 @@ def getImageChannels(tile):
 
 def TrainModel(trainData,validationData,trainDataGen, validationDataGen):
 
+    model = tf.keras.applications.xception.Xception(weights='imagenet')
 
-    model = tf.keras.applications.vgg19.VGG19('imagenet')
-    model.summary()
-    from tensorflow.keras.utils import plot_model
-    plot_model(model, to_file='VGG19.png')
-
-    #Change Output layer
+    # Change Output layer
     model.trainable = False
     base_output = model.layers[-2].output  # layer number obtained from model summary above
     new_output = tf.keras.layers.Dense(5, activation="softmax")(base_output)
@@ -230,14 +237,14 @@ def TrainModel(trainData,validationData,trainDataGen, validationDataGen):
         decay_steps=decaySteps,
         decay_rate=decayRate)
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learningRateSchedule)
 
 
     #Compile model
     model.compile(
         optimizer=optimizer,
         loss='sparse_categorical_crossentropy',
-        metrics=['accuracy'])
+        metrics=['accuracy','sparse_categorical_accuracy'])
 
     validationSteps = int(np.ceil(len(validationData) / float(batchSize)))
 
@@ -266,8 +273,7 @@ def TrainModel(trainData,validationData,trainDataGen, validationDataGen):
                         steps_per_epoch=stepsPerEpoch,
                         epochs=epochs,
                         callbacks=[modelCheckpointCallback,
-                                   tensorboardCallback,earlyStopCallback
-                                   ],
+                                   tensorboardCallback,earlyStopCallback],
                         validation_data=validationDataGen,
                         validation_steps=validationSteps)
 
@@ -302,12 +308,10 @@ def TrainModel(trainData,validationData,trainDataGen, validationDataGen):
     print("F1: {}\n".format(f1))
 
 
-def augmentImage(image, inputSize, aug_dict):
+def augmentImage(image, inputSize, aug_dict, label):
 
     defaultRotation = 0
 
-    rotation = defaultRotation
-    cropSize = 100
 
     widthRange = (int) (image[0].shape[1]/2)
     heightRange = (int) (image[0].shape[1]/2)
@@ -351,10 +355,10 @@ def augmentImage(image, inputSize, aug_dict):
             channel = channel[:, ::-1]
             image[i] = channel
 
-        image[i] = image[i]/float(255)
 
     image = skimage_transform.resize(image[0], (IMG_SHAPE, IMG_SHAPE),
                                        anti_aliasing=True)
+
 
     return image
 
