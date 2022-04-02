@@ -1,4 +1,5 @@
 import os
+import cv2
 import math
 import numpy as np
 import glob
@@ -9,35 +10,63 @@ import tensorflow as tf
 import sklearn.metrics
 import seaborn as sns
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import random as r
+import skimage.transform as skimage_transform
+import skimage.io as skimage_io
+import PIL.Image as PImage
 
 dataset_split_percentage = 0.8  # percentage of images for training
 epochs = 80
-batch_size = 100
+batchSize = 100
 IMG_SHAPE = 224
+inputSize = (224, 224)
 learningRate = 0.2
 
+dataSetDirectory :str
 trainingDirectory: str
 validationDirectory: str
+classes = ['roses', 'daisy', 'dandelion', 'sunflowers', 'tulips']
+classesDict= dict(roses=1,daisy=2,dandelion=3,sunflowers=4,tulips=5)
 
-def main():
-    print("Hello World!")
+
+testFolder = "test"
+modelsPath = "models"
+
+trainSize = -1  # -1 for all
+valSize = -1  # -1 for all
+testSize = -1  # -1 for all
+
+augmentation_args = dict(
+    width_shift_range=range((int)(IMG_SHAPE/2)),
+    height_shift_range=range((int)(IMG_SHAPE/2)),
+    rotation_range=[0,90, 270],
+    horizontal_flip=True,
+    zoom=[True,0.5]
+)
 
 
-def GetAndSaveImages():
+
+
+
+def DownloadAndSaveImages():
 
     _URL = "https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz"
     zip_file = tf.keras.utils.get_file(origin=_URL, fname="flower_photos.tgz", extract=True)
     base_dir = os.path.join(os.path.dirname(zip_file), 'flower_photos')
 
-    classes = ['roses', 'daisy', 'dandelion', 'sunflowers', 'tulips']
-
-
+    counter = 0
     for cl in classes:
+
+
+        #Store in different pastes
         img_path = os.path.join(base_dir, cl)
         images = glob.glob(img_path + '/*.jpg')
-        print("{}: {} Images".format(cl, len(images)))
+        #print("{}: {} Images".format(cl, len(images)))
+
+        #Separate for train and val
         num_train = int(round(len(images) * dataset_split_percentage))
         train, val = images[:num_train], images[num_train:]
+
 
         for t in train:
             if not os.path.exists(os.path.join(base_dir, 'train', cl)):
@@ -53,13 +82,17 @@ def GetAndSaveImages():
             if not os.path.exists(os.path.join(base_dir, 'val', cl, bn)):
                 shutil.move(v, os.path.join(base_dir, 'val', cl))
 
+
+        global dataSetDirectory
+        dataSetDirectory = base_dir
+
         global trainingDirectory
         trainingDirectory = os.path.join(base_dir, 'train')
 
         global validationDirectory
         validationDirectory = os.path.join(base_dir, 'val')
 
-        return classes
+
 
 
 def DataGenerator():
@@ -75,7 +108,7 @@ def DataGenerator():
         zoom_range=[0,0.5])
 
     trainDataGen = imagesGeneratedForTraining.flow_from_directory(
-        batch_size=batch_size,
+        batch_size=batchSize,
         directory=trainingDirectory,
         shuffle=True,
         target_size=(IMG_SHAPE, IMG_SHAPE),
@@ -84,7 +117,7 @@ def DataGenerator():
     imagesGeneratedForValidation = ImageDataGenerator(rescale=1. / 255)
 
     validationDataGen = imagesGeneratedForValidation.flow_from_directory(
-        batch_size=batch_size,
+        batch_size=batchSize,
         directory=validationDirectory,
         target_size=(IMG_SHAPE, IMG_SHAPE),
         class_mode='sparse')
@@ -92,7 +125,87 @@ def DataGenerator():
 
     return trainDataGen,validationDataGen
 
-def TrainModel(trainData, validationData, classes):
+def trainGenerator(batch_size, trainSetX, aug_dict, inputSize=(256, 256), inputChannels=3):
+
+    if batch_size > 0:
+        while 1:
+            iTile = 0
+            nBatches = int(np.ceil(len(trainSet) / batch_size))
+            for batchID in range(nBatches):
+                images = np.zeros(((batch_size,) + inputSize + (inputChannels,)))  #
+                labels = np.zeros((batch_size,1))
+                iTileInBatch = 0
+                while iTileInBatch < batch_size:
+                    if iTile < len(trainSet):
+
+                        image = getImageChannels(trainSetX[iTile][0])
+                        image = augmentImage(image, inputSize, aug_dict)
+                        image = np.array(image)
+                        images[iTileInBatch, :, :, :] = image[0]
+                        labels[iTileInBatch] = classesDict[trainSetX[iTile][1]]
+                        #for i in range(len(image)):
+                         #   images[iTileInBatch, :, :, i] = image[ :, :, i]
+
+                        iTile = iTile + 1
+                        iTileInBatch = iTileInBatch + 1
+                    else:
+                        images = images[0:iTileInBatch, :, :, :]
+                        break
+                yield (images,labels)
+
+
+def prepareDataset(datasetPath, trainFolder, valFolder):
+
+    trainSet = []
+    valSet = []
+
+
+    for cl in classes:
+
+
+        trainImagesPath = os.path.join(datasetPath, trainFolder, cl)
+        trainSetFolder = os.scandir(trainImagesPath)
+
+        for image in trainSetFolder:
+            imagePath = image.path
+            trainSet.append((imagePath,cl))
+
+        r.shuffle(trainSet)
+
+
+        valImagesPath = os.path.join(datasetPath, valFolder, cl)
+        valSetXFolder = os.scandir(valImagesPath)
+        for image in valSetXFolder:
+            imagePath = image.path
+            valSet.append((imagePath,cl))
+
+
+
+    return trainSet,valSet
+
+def normalizeMask(mask, num_class=2):
+    mask = mask / 255
+    new_mask = np.zeros(mask.shape + (num_class,))
+    for i in range(num_class):
+        new_mask[mask == i, i] = 1.
+    return new_mask
+
+
+def normalizeChannel(channel):
+    return (channel - 127.5) / 127.5
+
+
+def getImageChannels(tile):
+
+
+    channel = skimage_io.imread(tile)
+    channel = skimage_transform.resize(channel, (IMG_SHAPE, IMG_SHAPE),
+                                           anti_aliasing=True)
+    channel = normalizeChannel(channel)
+    return [channel]
+
+
+def TrainModel(trainData,validationData,trainDataGen, validationDataGen):
 
 
     model = tf.keras.applications.vgg19.VGG19('imagenet')
@@ -117,7 +230,7 @@ def TrainModel(trainData, validationData, classes):
         decay_steps=decaySteps,
         decay_rate=decayRate)
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learningRateSchedule)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
 
     #Compile model
@@ -126,28 +239,50 @@ def TrainModel(trainData, validationData, classes):
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy'])
 
-    validationSteps = int(np.ceil(validationData.n / float(batch_size)))
+    validationSteps = int(np.ceil(len(validationData) / float(batchSize)))
 
 
 
     tensorboardCallback,modelCheckpointCallback,earlyStopCallback = DefineCallbacks()
 
+
+
     #Training time
-    history = model.fit(
-        trainData,
-        steps_per_epoch=int(np.ceil(trainData.n / float(batch_size))),
-        epochs=epochs,
-        validation_data=validationData,
-        validation_steps=validationSteps,
-        callbacks=[tensorboardCallback,modelCheckpointCallback,earlyStopCallback]
-    )
+    #history = model.fit(
+    #    trainData,
+    #    steps_per_epoch=int(np.ceil(trainData.n / float(batchSize))),
+    #    epochs=epochs,
+    #    validation_data=validationData,
+    #    validation_steps=validationSteps,
+    #    callbacks=[tensorboardCallback,modelCheckpointCallback,earlyStopCallback]
+    #)
+
+    Ntrain = len(trainData)
+    stepsPerEpoch = np.ceil(Ntrain / batchSize)
+    Nval = len(validationData)
+    validationSteps = np.ceil(Nval / batchSize)
+
+    history = model.fit(trainDataGen,
+                        steps_per_epoch=stepsPerEpoch,
+                        epochs=epochs,
+                        callbacks=[modelCheckpointCallback,
+                                   tensorboardCallback,earlyStopCallback
+                                   ],
+                        validation_data=validationDataGen,
+                        validation_steps=validationSteps)
+
+
 
     validationLoss,validationAccuracy = model.evaluate(validationData,steps=validationSteps)
+
+
     validationX, validationY = next(validationData)
 
     predictionY = model.predict(validationX,steps=validationSteps)
     predictionY = np.argmax(predictionY,axis=1)
     trueY = validationY
+
+
 
     #Confusion Matrix
     confusionMatrix = sklearn.metrics.confusion_matrix(trueY,predictionY)
@@ -158,12 +293,6 @@ def TrainModel(trainData, validationData, classes):
     recall = sklearn.metrics.recall_score(trueY,predictionY,average='weighted')
     f1 = sklearn.metrics.f1_score(trueY,predictionY,average='weighted')
 
-   # ax,plt =
-    #ax = sns.heatmap(confusionMatrix,annot=True,cmap='Blues')
-    #ax.set_title("Confusion Matrix")
-    #ax.xaaxis.set_ticklabels(classes)
-    #ax.yaxis.set_ticklabels(classes)
-    #plt.show()
 
 
     sns.make_confusion_matrix(confusionMatrix, figsize=(len(classes), len(classes)), cbar=False)
@@ -173,9 +302,61 @@ def TrainModel(trainData, validationData, classes):
     print("F1: {}\n".format(f1))
 
 
+def augmentImage(image, inputSize, aug_dict):
+
+    defaultRotation = 0
+
+    rotation = defaultRotation
+    cropSize = 100
+
+    widthRange = (int) (image[0].shape[1]/2)
+    heightRange = (int) (image[0].shape[1]/2)
+
+    if 'width_shift_range' in aug_dict:
+        cropx = r.sample(range(widthRange) ,1)[0]
+    else:
+        cropx = 0
 
 
+    if 'height_shift_range' in aug_dict:
+        cropy = r.sample(range(heightRange), 1)[0]
+    else:
+        cropy = 0
 
+
+    if 'rotation_range' in aug_dict:
+        rotation = r.sample(aug_dict['rotation_range'], 1)[0]
+
+
+    if 'horizontal_flip' in aug_dict and aug_dict['horizontal_flip']:
+        do_horizontal_flip = r.sample([False, True], 1)[0]
+    else:
+        do_horizontal_flip = False
+
+
+    for i in range(len(image)):
+
+        channel = image[i]
+
+        #Crop
+        channel = channel[cropy:cropy + inputSize[0], cropx:cropx + inputSize[1]]
+
+        #Reshape
+        channel = skimage_transform.resize(channel, (IMG_SHAPE, IMG_SHAPE),
+                                           anti_aliasing=True)
+        #Rotate
+        channel = skimage_transform.rotate(channel, rotation)
+
+        if do_horizontal_flip:
+            channel = channel[:, ::-1]
+            image[i] = channel
+
+        image[i] = image[i]/float(255)
+
+    image = skimage_transform.resize(image[0], (IMG_SHAPE, IMG_SHAPE),
+                                       anti_aliasing=True)
+
+    return image
 
 
 def DefineCallbacks():
@@ -202,7 +383,20 @@ def DefineCallbacks():
 
     return tensorboardCallback,modelCheckpointCallback,earlyStopCallback
 
+
+
+
 if __name__ == "__main__":
-    classes = GetAndSaveImages()
-    trainDataGenerated,validationDataGenerated = DataGenerator()
-    TrainModel(trainDataGenerated,validationDataGenerated,classes)
+
+    DownloadAndSaveImages()
+
+    trainSet, valSet = prepareDataset(datasetPath=dataSetDirectory, trainFolder=trainingDirectory, valFolder=validationDirectory)
+
+    trainGen = trainGenerator(batchSize, trainSet, augmentation_args, inputSize=inputSize, inputChannels=3)
+
+    valGen = trainGenerator(batchSize, valSet, dict(), inputSize=inputSize, inputChannels=3)
+
+    TrainModel(trainSet,valSet,trainDataGen=trainGen,validationDataGen=valGen)
+
+    #trainDataGenerated,validationDataGenerated = DataGenerator()
+    #TrainModel(trainGene,valGene,classes)
